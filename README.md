@@ -18,3 +18,9 @@ redis-server &             # or docker‑compose up redis
 python run.py              # Web UI @ :5008
 celery -A celery_worker worker --loglevel=info
 ```
+
+
+commands
+
+
+celery -A celery_worker worker --loglevel=info --logfile=logs/celery_worker.log
