@@ -15,7 +15,8 @@ class Config:
     BROKER_URL      = os.getenv("CELERY_BROKER_URL",      "redis://localhost:6379/5")
     RESULT_BACKEND  = os.getenv("CELERY_RESULT_BACKEND",  "redis://localhost:6379/6")
     CELERY_INCLUDE  = ["app.modules.data_transfer.tasks"]
-
+    CELERY_WORKER_POOL = 'solo'
+    
     SSE_REDIS_URL = os.getenv("SSE_REDIS_URL", "redis://localhost:6379/7")
 
     ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")

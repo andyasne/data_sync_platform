@@ -10,9 +10,6 @@ logging.basicConfig(
     handlers=[logging.StreamHandler()]
 )
 
-# 1) Make sure your env-vars are loaded (and URL-encode that "!" in the password)
-pw = "Login2Dash!"
-pw_enc = quote_plus(pw)  # → "Login2Dash%21"
  
 from dotenv import load_dotenv
 # 2) Create your Flask app & Celery
@@ -38,7 +35,7 @@ if __name__ == "__main__":
         logging.debug("Dispatching sync_table_task synchronously (eager mode)…")
         try:
             # you can still use .delay(); it'll run in–process because of eager mode
-            result = sync_table_task.delay("site_code", "server_modified_date")
+            result = sync_table_task.delay("site_code", "")
             
             # Poll for its state just like before
             for _ in range(5):

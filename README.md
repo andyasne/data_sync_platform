@@ -24,3 +24,9 @@ commands
 
 
 celery -A celery_worker worker --loglevel=info --logfile=logs/celery_worker.log
+
+# Purge all tasks from all queues
+celery -A celery_worker.celery purge
+
+# Or purge specific queue
+celery -A celery_worker.celery purge -Q celery
