@@ -1,0 +1,19 @@
+import os
+from pathlib import Path
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+
+class Config:
+    SECRET_KEY = os.getenv("SECRET_KEY", "change-me")
+    SQLALCHEMY_DATABASE_URI = os.getenv("APP_DB_URI", f"sqlite:///{BASE_DIR/'app.db'}")
+    SQLALCHEMY_TRACK_MODIFICATIONS = False
+
+    SOURCE_DB_URI = os.getenv("SOURCE_DB_URI", "postgresql://user:pass@host1/db1")
+    TARGET_DB_URI = os.getenv("TARGET_DB_URI", "postgresql://user:pass@host2/db2")
+
+    CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/5")
+    CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", "redis://localhost:6379/6")
+    SSE_REDIS_URL = os.getenv("SSE_REDIS_URL", "redis://localhost:6379/7")
+
+    ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
+    ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "123")

@@ -1,0 +1,22 @@
+
+version: '3.9'
+services:
+  web:
+    build: .
+    ports:
+      - "5008:5008"
+    env_file:
+      - .env
+    depends_on:
+      - redis
+  worker:
+    build: .
+    command: celery -A celery_worker worker --loglevel=info
+    env_file:
+      - .env
+    depends_on:
+      - redis
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
