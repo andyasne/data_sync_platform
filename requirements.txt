@@ -8,3 +8,4 @@ psycopg2-binary==2.9.9
 Celery==5.3.6
 redis==5.0.4
 requests==2.31.0
+flasgger==0.9.7.1

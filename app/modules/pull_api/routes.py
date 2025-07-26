@@ -1,25 +1,117 @@
-from flask import Blueprint, jsonify, current_app
-from sqlalchemy import create_engine, text
+from flask import Blueprint, jsonify, current_app, request
+from sqlalchemy import text, create_engine
 from ...modules.auth.decorators import basic_auth_required
 
-pull_bp = Blueprint('pull_api', __name__)
+pull_bp = Blueprint("pull_api", __name__)
+_engine = None
 
-engine = None
+def engine():
+    global _engine
+    if _engine is None:
+        _engine = create_engine(current_app.config["PULL_API_TARGET_DB_URI"])
+    return _engine
 
-def get_engine():
-    global engine
-    if engine is None:
-        engine = create_engine(current_app.config['TARGET_DB_URI'])
-    return engine
 
-@pull_bp.route('/client/<int:client_id>')
+@pull_bp.route("/clients", methods=["GET"])
 @basic_auth_required
-def client(client_id):
-    row = get_engine().execute(text('SELECT * FROM client WHERE id=:id'), {'id': client_id}).fetchone()
-    return jsonify(dict(row)) if row else ('Not found', 404)
+def clients():
+    """
+    Get one or many client_v2 rows
+    ---
+    tags: 
+      - client
+    security:
+      - basicAuth: []
+    parameters:
+      - name: ids
+        in: query
+        type: array
+        items: 
+          type: string
+        collectionFormat: csv
+        description: Comma-separated list of client IDs. Omit to fetch by other filters.
+      - name: empty_subjectActions
+        in: query
+        type: boolean
+        description: "true => rows where subjectActions is NULL or empty"
+      - name: empty_simprintsId
+        in: query
+        type: boolean
+        description: "true => rows where simprintsId is NULL or empty"
+    responses:
+      200:
+        description: Array of client objects
+        schema:
+          type: array
+          items: 
+            $ref: '#/definitions/Client'
+      401:
+        description: Unauthorized
+    """
+    ids         = request.args.get("ids")
+    empty_sa    = request.args.get("empty_subjectActions") == "true"
+    empty_simp  = request.args.get("empty_simprintsId") == "true"
 
-@pull_bp.route('/biometric_identity/<int:bio_id>')
+    clauses, params = [], {}
+    if ids:
+        id_list = [i.strip() for i in ids.split(",")]
+        clauses.append("id = ANY(:ids)")
+        params["ids"] = id_list
+    # Handle subjectActions filter
+    
+    # Normalize values to lowercase
+    empty_sa = (request.args.get("empty_subjectActions") or "").lower()
+    empty_simp = (request.args.get("empty_simprintsId") or "").lower()
+
+    # Handle subjectActions filter
+    if empty_sa == "true":
+        clauses.append("(\"subjectActions\" IS NULL OR \"subjectActions\" = '')")
+    elif empty_sa == "false":
+        clauses.append("(\"subjectActions\" IS NOT NULL AND \"subjectActions\" != '')")
+
+    # Handle simprintsId filter
+    if empty_simp == "true":
+        clauses.append("(\"simprintsId\" IS NULL OR \"simprintsId\" = '')")
+    elif empty_simp == "false":
+        clauses.append("(\"simprintsId\" IS NOT NULL AND \"simprintsId\" != '')")
+
+    where = " AND ".join(clauses) or "TRUE"
+    sql   = f"SELECT \"simprintsId\", id, \"subjectActions\" FROM client_v2 WHERE {where}"
+
+    with engine().connect() as conn:
+        rows = conn.execute(text(sql), params).fetchall()
+
+    return jsonify([dict(r._mapping) for r in rows]) if rows else ("Not found", 404)
+
+
+@pull_bp.route("/biometric_identity/<string:bio_id>", methods=["GET"])
 @basic_auth_required
-def biometric(bio_id):
-    row = get_engine().execute(text('SELECT * FROM biometric_identity WHERE id=:id'), {'id': bio_id}).fetchone()
-    return jsonify(dict(row)) if row else ('Not found', 404)
+def biometric_identity(bio_id):
+    """
+    Get one biometric_identity row
+    ---
+    tags: 
+      - biometric_identity
+    security:
+      - basicAuth: []
+    parameters:
+      - name: bio_id
+        in: path
+        required: true
+        type: string
+        description: The biometric identity ID
+    responses:
+      200:
+        description: A biometric_identity object
+        schema: 
+          $ref: '#/definitions/BiometricIdentity'
+      404:
+        description: Not found
+      401:
+        description: Unauthorized
+    """
+    sql = "SELECT * FROM biometric_identity WHERE id=:id"
+    with engine().connect() as conn:
+        row = conn.execute(text(sql), {"id": bio_id}).fetchone()
+
+    return jsonify(dict(row._mapping)) if row else ("Not found", 404)

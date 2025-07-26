@@ -1,13 +1,19 @@
+from flask import request, Response
 from functools import wraps
-from flask import request, current_app, Response
+import os
 
 def basic_auth_required(f):
     @wraps(f)
-    def wrapper(*args, **kwargs):
+    def decorated(*args, **kwargs):
         auth = request.authorization
-        if not auth or not (auth.username == current_app.config['ADMIN_USERNAME']
-                            and auth.password == current_app.config['ADMIN_PASSWORD']):
-            return Response('Authentication required', 401,
-                            {'WWW-Authenticate': 'Basic realm="Login Required"'})
+        valid_user = os.environ.get("PULL_API_USER")
+        valid_pass = os.environ.get("PULL_API_PASS")
+
+        if not auth or auth.username != valid_user or auth.password != valid_pass:
+            return Response(
+                "Unauthorized", 401,
+                {'WWW-Authenticate': 'Basic realm="Login Required"'}
+            )
+
         return f(*args, **kwargs)
-    return wrapper
+    return decorated
