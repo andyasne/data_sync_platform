@@ -11,7 +11,6 @@ def engine():
         _engine = create_engine(current_app.config["PULL_API_TARGET_DB_URI"])
     return _engine
 
-
 @pull_bp.route("/clients", methods=["GET"])
 @basic_auth_required
 def clients():
@@ -30,6 +29,13 @@ def clients():
           type: string
         collectionFormat: csv
         description: Comma-separated list of client IDs. Omit to fetch by other filters.
+      - name: simprintsId
+        in: query
+        type: array
+        items: 
+          type: string
+        collectionFormat: csv
+        description: Comma-separated list of simprints IDs.
       - name: empty_subjectActions
         in: query
         type: boolean
@@ -48,20 +54,28 @@ def clients():
       401:
         description: Unauthorized
     """
-    ids         = request.args.get("ids")
-    empty_sa    = request.args.get("empty_subjectActions") == "true"
-    empty_simp  = request.args.get("empty_simprintsId") == "true"
+    ids          = request.args.get("ids")
+    simprint_ids = request.args.get("simprintsId")
+
+    empty_sa     = (request.args.get("empty_subjectActions") or "").lower()
+    empty_simp   = (request.args.get("empty_simprintsId") or "").lower()
 
     clauses, params = [], {}
+
+    # Handle id and simprintsId filters using OR
+    or_clauses = []
     if ids:
         id_list = [i.strip() for i in ids.split(",")]
-        clauses.append("id = ANY(:ids)")
+        or_clauses.append("id = ANY(:ids)")
         params["ids"] = id_list
-    # Handle subjectActions filter
-    
-    # Normalize values to lowercase
-    empty_sa = (request.args.get("empty_subjectActions") or "").lower()
-    empty_simp = (request.args.get("empty_simprintsId") or "").lower()
+
+    if simprint_ids:
+        simp_list = [s.strip() for s in simprint_ids.split(",")]
+        or_clauses.append("\"simprintsId\" = ANY(:simprints_ids)")
+        params["simprints_ids"] = simp_list
+
+    if or_clauses:
+        clauses.append(f"({' OR '.join(or_clauses)})")
 
     # Handle subjectActions filter
     if empty_sa == "true":
@@ -69,20 +83,19 @@ def clients():
     elif empty_sa == "false":
         clauses.append("(\"subjectActions\" IS NOT NULL AND \"subjectActions\" != '')")
 
-    # Handle simprintsId filter
+    # Handle simprintsId empty filter
     if empty_simp == "true":
         clauses.append("(\"simprintsId\" IS NULL OR \"simprintsId\" = '')")
     elif empty_simp == "false":
         clauses.append("(\"simprintsId\" IS NOT NULL AND \"simprintsId\" != '')")
 
-    where = " AND ".join(clauses) or "TRUE"
-    sql   = f"SELECT \"simprintsId\", id, \"subjectActions\" FROM client_v2 WHERE {where}"
+    where = " AND ".join(clauses) if clauses else "TRUE"
+    sql = f'SELECT "simprintsId", id, "subjectActions" FROM client_v2 WHERE {where}'
 
     with engine().connect() as conn:
         rows = conn.execute(text(sql), params).fetchall()
 
     return jsonify([dict(r._mapping) for r in rows]) if rows else ("Not found", 404)
-
 
 @pull_bp.route("/biometric_identity/<string:bio_id>", methods=["GET"])
 @basic_auth_required
