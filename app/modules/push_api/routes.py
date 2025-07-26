@@ -1,7 +1,7 @@
 from flask import Blueprint, request, jsonify, current_app
 import requests
 from ...modules.auth.decorators import basic_auth_required
-from ...utils.sse import announcer
+from ...utils.sse import announce
 
 push_bp = Blueprint('push_api', __name__)
 
@@ -16,5 +16,5 @@ def push_data():
     }
     dest_url = current_app.config.get("DESTINATION_URL", "http://other-server/api/receive")
     resp = requests.post(dest_url, json=transformed, timeout=10)
-    announcer.announce({"push": transformed, "status": resp.status_code})
+    announce({"push": transformed, "status": resp.status_code})
     return jsonify({"status": resp.status_code, "response": resp.text}), resp.status_code

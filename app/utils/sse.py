@@ -1,30 +1,25 @@
-import queue
-from flask import Blueprint, Response, stream_with_context, current_app, json
+from flask import Blueprint, Response, stream_with_context
+from .redis_client import r           # <-- same client for every process
+import json
 
-class Announcer:
-    def __init__(self):
-        self.listeners = []
-
-    def listen(self):
-        q = queue.Queue(maxsize=5)
-        self.listeners.append(q)
-        return q
-
-    def announce(self, msg: dict):
-        for i in reversed(range(len(self.listeners))):
-            try:
-                self.listeners[i].put_nowait(msg)
-            except queue.Full:
-                del self.listeners[i]
-
-announcer = Announcer()
 sse_bp = Blueprint("sse", __name__)
 
-@sse_bp.route("/")
+CHANNEL = "sync_events"
+
+def announce(payload: dict):
+    print("PUBLISH", payload, flush=True)  
+    r.publish(CHANNEL, json.dumps(payload))   # one-liner!
+
+def _event_stream():
+    pubsub = r.pubsub(ignore_subscribe_messages=True)
+    pubsub.subscribe(CHANNEL)
+    for msg in pubsub.listen():               # blocks efficiently
+        yield f"data: {msg['data']}\n\n"
+
+@sse_bp.route("/stream")
 def stream():
-    def event_stream():
-        q = announcer.listen()
-        while True:
-            data = q.get()
-            yield f"data: {json.dumps(data)}\n\n"
-    return Response(stream_with_context(event_stream()), mimetype="text/event-stream")
+    return Response(
+        stream_with_context(_event_stream()),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache"},
+    )

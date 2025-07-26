@@ -1,108 +1,129 @@
-import logging
-import os
-
+import logging, os
 from celery import shared_task
 from sqlalchemy import (
-    create_engine,
-    MetaData,
-    Table,
-    select,
-    func,
-    inspect,
-    delete,
+    create_engine, MetaData, Table, select, func,
+    inspect, delete
 )
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import SQLAlchemyError
 
-from ...utils.sse import announcer
+from ...utils.sse import announce  # ← only import THIS
 
-#logging = logging.getlogging(__name__)
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
-    handlers=[logging.StreamHandler()]
-)
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Helper: push every log‑line as an SSE message
+# ──────────────────────────────────────────────────────────────────────────────
+class SSELogHandler(logging.Handler):
+    """Logging handler that streams every record as a Server‑Sent Event."""
+
+    def __init__(self, table_name: str):
+        super().__init__()
+        self.table_name = table_name
+        self.setFormatter(
+            logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+        )
+
+    def emit(self, record):
+        try:
+            announce(
+                {
+                    "kind": "log",  # <── tag as log frame
+                    "table": self.table_name,
+                    "level": record.levelname.lower(),
+                    "message": self.format(record),
+                }
+            )
+        except Exception:
+            # never let logging failure crash the task
+            self.handleError(record)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# The Celery task
+# ──────────────────────────────────────────────────────────────────────────────
 @shared_task(bind=True, name="sync_table_task")
-def sync_table_task(self, table_name: str, modified_col: str = "server_modified_date") -> None:
-    logging.info("Starting sync: table=%r  modified_col=%r", table_name, modified_col)
+def sync_table_task(
+    self,
+    table_name: str,
+    modified_col: str = "server_modified_date",
+) -> None:
+    """Synchronise a source → target table, streaming progress + logs via SSE."""
 
-    # ──── 1) Engines ──────────────────────────────────────────────────────────
+    logger = logging.getLogger(f"sync.{table_name}.{self.request.id}")
+    logger.setLevel(logging.DEBUG)
+    logger.addHandler(SSELogHandler(table_name))
+    logger.propagate = False
+    # initial heartbeat — lets the UI show the task immediately
+    logger.info("Starting sync: table=%r  modified_col=%r", table_name, modified_col)
+    announce({"kind": "progress", "table": table_name, "processed": 0, "total": 0})
+
+    # ── 1) Engines ───────────────────────────────────────────────────────────
     src_engine = create_engine(os.environ["SOURCE_DB_URI"])
     tgt_engine = create_engine(os.environ["TARGET_DB_URI"])
-    logging.debug("DSNs → src=%s  tgt=%s", src_engine.url, tgt_engine.url)
+    logger.debug("DSNs → src=%s  tgt=%s", src_engine.url, tgt_engine.url)
 
-    # ──── 2) Reflect source ───────────────────────────────────────────────────
+    # ── 2) Reflect source ────────────────────────────────────────────────────
     src_meta = MetaData()
     src_table = Table(table_name, src_meta, autoload_with=src_engine)
-    logging.info("Source columns: %s", [c.name for c in src_table.columns])
+    logger.info("Source columns: %s", [c.name for c in src_table.columns])
 
-    # ──── 3) Ensure target exists ─────────────────────────────────────────────
+    # ── 3) Ensure target exists ──────────────────────────────────────────────
     tgt_meta = MetaData()
-    inspector = inspect(tgt_engine)
-    if not inspector.has_table(table_name):
-        logging.info("Creating target table %r…", table_name)
+    if not inspect(tgt_engine).has_table(table_name):
+        logger.info("Creating target table %r…", table_name)
         tgt_table = Table(table_name, tgt_meta)
         for col in src_table.columns:
             tgt_table.append_column(col.copy())
         tgt_meta.create_all(tgt_engine)
-        logging.info("Table %r created; ", table_name)
-         
+        logger.info("Table %r created.", table_name)
 
     tgt_table = Table(table_name, tgt_meta, autoload_with=tgt_engine)
-    logging.info("Target table %r exists; proceeding to sync.", table_name)
+    logger.info("Target table %r exists; proceeding to sync.", table_name)
 
-    # ──── 4) PK detection ──────────────────────────────────────────────────────
+    # ── 4) PK detection ──────────────────────────────────────────────────────
     pk_cols = list(src_table.primary_key.columns)
     if not pk_cols:
-        logging.warning("No PK on %r; doing full reload.", table_name)
+        logger.warning("No PK on %r; doing full reload.", table_name)
 
-        # 1️⃣ Truncate target
+        # ➊ Truncate target
         with tgt_engine.begin() as tgt_conn:
             deleted = tgt_conn.execute(delete(tgt_table)).rowcount
-        logging.info("Cleared %d rows from %r", deleted, table_name)
+        logger.info("Cleared %d rows from %r", deleted, table_name)
+        announce({"kind": "progress", "table": table_name, "processed": 0, "total": 0})
 
-            # 2️⃣ Pull fresh rows from SOURCE
+        # ➋ Pull all rows from source
         with src_engine.connect() as src_conn:
-            # ➊ Which DB are we hitting?
-            logging.debug("🔎 SOURCE DSN → %s", src_conn.engine.url)
+            total = src_conn.execute(select(func.count()).select_from(src_table)).scalar() or 0
+            announce({"kind": "progress", "table": table_name, "processed": 0, "total": total})
 
-            # ➋ How many rows does COUNT(*) say are there?
-            row_count = src_conn.execute(select(func.count()).select_from(src_table)).scalar()
-            logging.debug("🔎 Source row-count via COUNT(*) = %s", row_count)
+            rows = src_conn.execute(select(src_table)).mappings().all()
+        logger.info("Fetched %d rows from %r", len(rows), table_name)
 
-            # ➌ Show the fully-rendered SQLAlchemy text we’re about to run
-            sel_stmt = select(src_table)
-            logging.debug("🔎 SOURCE SQL → %s", sel_stmt)
-
-            # ➍ Actually pull the rows
-            rows = src_conn.execute(sel_stmt).mappings().all()
-            logging.info("Fetched %d rows from source %r", len(rows), table_name)
-            if rows:
-                logging.debug("🔎 Sample row[0] = %s", rows[0])
-
-        # 3️⃣ Bulk-insert into TARGET
+        # ➌ Bulk‑insert
         if rows:
             with tgt_engine.begin() as tgt_conn:
                 tgt_conn.execute(pg_insert(tgt_table), rows)
-            logging.info("Reloaded %d rows into %r", len(rows), table_name)
+            logger.info("Reloaded %d rows into %r", len(rows), table_name)
+            announce({
+                "kind": "progress",
+                "table": table_name,
+                "processed": len(rows),
+                "total": total,
+            })
         else:
-            logging.info("No rows found in source %r; nothing to load.", table_name)
+            logger.info("No rows found in source %r; nothing to load.", table_name)
+        return
 
-        return  # ← only ONE return, here
-        
-    pk_col = pk_cols[0]
-
-    # ──── 5) Count & chunked upsert ────────────────────────────────────────────
+    # ── 5) Chunked upsert (PK present) ───────────────────────────────────────
     with src_engine.connect() as conn:
-        total_rows = conn.execute(select(func.count()).select_from(src_table)).scalar() or 0
+        total = conn.execute(select(func.count()).select_from(src_table)).scalar() or 0
+    announce({"kind": "progress", "table": table_name, "processed": 0, "total": total})
 
-    chunk_size = int(os.getenv("CHUNK_SIZE", 10_000))
-    logging.info("Total rows=%d; chunk_size=%d", total_rows, chunk_size)
-
-    last_id = 0
+    pk_col = pk_cols[0]
+    chunk_sz = int(os.getenv("CHUNK_SIZE", 10_000))
     processed = 0
-    has_mod   = modified_col in src_table.c
+    last_id = 0
+    has_mod = modified_col in src_table.c
 
     while True:
         with src_engine.connect() as conn:
@@ -111,11 +132,12 @@ def sync_table_task(self, table_name: str, modified_col: str = "server_modified_
                     select(src_table)
                     .where(pk_col > last_id)
                     .order_by(pk_col)
-                    .limit(chunk_size)
+                    .limit(chunk_sz)
                 )
                 .mappings()
                 .all()
             )
+
         if not chunk:
             break
 
@@ -131,10 +153,7 @@ def sync_table_task(self, table_name: str, modified_col: str = "server_modified_
             stmt = stmt.on_conflict_do_update(
                 index_elements=[pk_col.name],
                 set_=update_cols,
-                where=(
-                    getattr(stmt.excluded, modified_col)
-                    > getattr(tgt_table.c, modified_col)
-                ),
+                where=(getattr(stmt.excluded, modified_col) > getattr(tgt_table.c, modified_col)),
             )
         else:
             stmt = stmt.on_conflict_do_update(
@@ -146,12 +165,23 @@ def sync_table_task(self, table_name: str, modified_col: str = "server_modified_
             with tgt_engine.begin() as conn:
                 conn.execute(stmt)
             processed += len(chunk)
-            announcer.announce(
-                {"table": table_name, "processed": processed, "total": total_rows}
-            )
-            logging.debug("Upserted %d rows; last_id=%r", len(chunk), last_id)
+            announce({
+                "kind": "progress",
+                "table": table_name,
+                "processed": processed,
+                "total": total,
+            })
+            logger.debug("Upserted %d rows; last_id=%r", len(chunk), last_id)
+
         except SQLAlchemyError as exc:
-            logging.exception("Upsert error; will retry")
+            logger.exception("Upsert error; will retry")
+            announce({
+                "kind": "log",
+                "table": table_name,
+                "level": "error",
+                "message": str(exc),
+            })
             raise self.retry(exc=exc, countdown=30, max_retries=5)
 
-    logging.info("Finished sync %r: %d/%d rows processed", table_name, processed, total_rows)
+    logger.info("Finished sync %r: %d/%d rows", table_name, processed, total)
+    announce({"kind": "progress", "table": table_name, "processed": total, "total": total})

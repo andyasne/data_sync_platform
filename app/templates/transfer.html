@@ -1,0 +1,34 @@
+<div id="progress" class="progress-console"></div>
+
+<script>
+(() => {
+  const progressEl = document.getElementById("progress");
+  const evt = new EventSource("/events");
+
+  evt.onmessage = (ev) => {
+    try {
+      const data = JSON.parse(ev.data);   // {table, level, message, …}
+
+      // Filter: show only events for the table the user is currently looking at
+      if (data.table !== "{{ table_name }}") return;
+
+      const line = document.createElement("div");
+      line.className = "log " + (data.level || "info");
+      line.innerHTML = data.message;      // message may contain simple Markdown/emoji
+      progressEl.appendChild(line);
+      progressEl.scrollTop = progressEl.scrollHeight;   // auto-scroll
+    } catch (e) {
+      console.error("Bad SSE payload", e);
+    }
+  };
+})();
+</script>
+
+<style>
+.progress-console      { font-family: monospace; height: 280px; overflow-y: auto;
+                         background:#111;color:#eaeaea;padding:8px;border-radius:6px }
+.log.info              { color:#9cdcfe }
+.log.warning           { color:#f8d98b }
+.log.error             { color:#ff8080 }
+.log.success           { color:#7dcf7d }
+</style>
